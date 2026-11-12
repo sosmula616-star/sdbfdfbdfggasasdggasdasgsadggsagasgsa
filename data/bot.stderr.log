@@ -1,0 +1,5 @@
+2026-11-12 19:41:26,484 WARNING Повторный запрос к Telegram отложен (getUpdates: ошибка связи с Telegram)
+2026-11-12 20:18:21,744 WARNING Telegram отклонил отправку (sendVoice: 400)
+2026-11-12 21:40:11,635 WARNING Повторный запрос к Telegram отложен (getUpdates: ошибка связи с Telegram)
+2026-11-12 21:40:18,042 WARNING Повторный запрос к Telegram отложен (getUpdates: ошибка связи с Telegram)
+2026-11-12 21:54:21,314 WARNING Повторный запрос к Telegram отложен (getUpdates: ошибка связи с Telegram)
