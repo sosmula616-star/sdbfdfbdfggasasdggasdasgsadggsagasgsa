@@ -25,18 +25,20 @@ def archive_sample(database_path):
     return None
 
 
-def load_key(bot_id, database_path):
+def load_key(bot_id, database_path, *, fresh=False):
     project_key = Path(__file__).resolve().parent / f"{bot_id}.key"
+    archive_key = database_path.with_suffix(".key")
     if os.name == "nt":
         key_dir = Path(os.environ["LOCALAPPDATA"]) / "Dialogspy"
     else:
         config_dir = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
         key_dir = Path(config_dir) / "dialogspy"
     key_path = key_dir / f"{bot_id}.key"
-    sample = archive_sample(database_path)
+    existing_archive = database_path.exists() and not fresh
+    sample = archive_sample(database_path) if existing_archive else None
     available = []
-    for candidate in (project_key, key_path):
-        if candidate == key_path and not database_path.exists():
+    for candidate in (project_key, archive_key, key_path):
+        if candidate == key_path and not existing_archive:
             continue
         if not candidate.is_file():
             continue
@@ -48,21 +50,27 @@ def load_key(bot_id, database_path):
                 cipher.decrypt(sample)
         except (InvalidToken, ValueError):
             continue
+        if not archive_key.exists():
+            archive_key.parent.mkdir(parents=True, exist_ok=True)
+            with archive_key.open("xb") as copy:
+                copy.write(key)
+            archive_key.chmod(0o600)
         return key
     if available:
         raise RuntimeError(f"Найденные ключи не открывают архив {database_path}. "
                            f"Проверены: {', '.join(available)}. Нужен исходный ключ этого архива.")
-    if database_path.exists():
+    if existing_archive:
         raise RuntimeError(f"Для существующего архива положите исходный ключ {bot_id}.key "
                            f"рядом с bot.py: {project_key}")
+    archive_key.parent.mkdir(parents=True, exist_ok=True)
     try:
-        descriptor = os.open(project_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        descriptor = os.open(archive_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
         pass
     else:
         with os.fdopen(descriptor, "wb") as key_file:
             key_file.write(Fernet.generate_key())
-    return project_key.read_bytes()
+    return archive_key.read_bytes()
 
 
 def start_new_archive(bot_id, database_path):
@@ -79,7 +87,7 @@ def start_new_archive(bot_id, database_path):
     ):
         raise RuntimeError("Архив и резервная копия должны находиться в папке данных бота.")
 
-    key = load_key(bot_id, backup / "new.sqlite3")
+    key = load_key(bot_id, database_path, fresh=True)
     backup.mkdir(mode=0o700, parents=True, exist_ok=False)
     moved = []
     try:

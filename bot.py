@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import logging
 import os
 import re
@@ -741,13 +742,22 @@ def main(*, new_archive=False):
     database = directory / f"{me['id']}.sqlite3"
     with single_instance(database.with_suffix(".lock")):
         reset_request = ROOT / "new-archive.once"
-        if new_archive or reset_request.is_file():
+        reset_receipt = None
+        if reset_request.is_file():
+            request_id = hashlib.sha256(reset_request.read_bytes()).hexdigest()
+            reset_receipt = directory / f".new-archive-{me['id']}-{request_id}.done"
+        if new_archive or (reset_receipt is not None and not reset_receipt.exists()):
             backup = start_new_archive(me["id"], database)
-            reset_request.unlink(missing_ok=True)
+            if reset_receipt is not None:
+                reset_receipt.write_text(str(backup), encoding="utf-8")
             print(f"Резервная копия архива и медиа сохранена в {backup}\nНовый архив создан.", flush=True)
             if new_archive:
                 print("Теперь запустите python bot.py и откройте ссылку привязки.", flush=True)
                 return
+        try:
+            reset_request.unlink(missing_ok=True)
+        except PermissionError:
+            pass
         key = load_key(me["id"], database)
         archive = Archive(database, key)
         with closing(archive.db):
