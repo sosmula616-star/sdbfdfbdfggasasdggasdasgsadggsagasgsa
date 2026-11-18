@@ -12,12 +12,33 @@ from threading import Event
 from cryptography.fernet import InvalidToken
 
 from archive import Archive, load_key
-from formatting import diff_parts, format_time, notice_parts, version_runs
+from formatting import author_link, diff_parts, format_time, media_author, notice_parts
 from media_vault import MediaVault, download_worker
 from telegram_api import Telegram, TelegramError
 
 
 ROOT = Path(__file__).resolve().parent
+LOVE_HEART = "\n".join((
+    "🤍❤️❤️🤍🤍🤍❤️❤️🤍",
+    "❤️❤️❤️❤️🤍❤️❤️❤️❤️",
+    "❤️❤️❤️❤️❤️❤️❤️❤️❤️",
+    "❤️❤️❤️❤️❤️❤️❤️❤️❤️",
+    "🤍❤️❤️❤️❤️❤️❤️❤️🤍",
+    "🤍🤍❤️❤️❤️❤️❤️🤍🤍",
+    "🤍🤍🤍❤️❤️❤️🤍🤍🤍",
+    "🤍🤍🤍🤍❤️🤍🤍🤍🤍",
+))
+LOVE_FRAMES = (
+    "🤍",
+    "🩷",
+    "🤍🩷🤍🩷🤍\n🩷🩷🩷🩷🩷\n🤍🩷🩷🩷🤍\n🤍🤍🩷🤍🤍",
+    LOVE_HEART.replace("❤️", "🩷"),
+    LOVE_HEART,
+    LOVE_HEART.replace("❤️", "💗"),
+    f"{LOVE_HEART}\n\nЯ люблю тебя",
+    f"{LOVE_HEART.replace('❤️', '🩷')}\n\nЯ люблю тебя ❤️",
+)
+LOVE_FRAME_DELAY = 1.2
 UPDATES = [
     "message", "business_connection", "business_message",
     "edited_business_message", "deleted_business_messages",
@@ -46,7 +67,8 @@ HELP = ("Аккаунт привязан. Подключите бота чере
         "/status — статус подключения\n/last — последнее изменение или удаление\n"
         "/recent — последние сообщения в архиве\n"
         "/history номер — полная история сообщения\n"
-        "/media номер [версия] — файл из локального архива")
+        "/media номер [версия] — файл из локального архива\n\n"
+        ".luv — отправьте в подключённом чате, чтобы заменить команду анимацией «Я люблю тебя ❤️».")
 
 
 def read_config():
@@ -138,6 +160,8 @@ def snapshot_fields(message, owner_id, attachment):
     reply_text = reply.get("text") if not restricted_message(reply) else None
     return {
         "author": "Вы" if sender.get("id") == owner_id else display_name(sender),
+        "author_id": sender.get("id"),
+        "author_username": sender.get("username"),
         "sent_at": message.get("date"),
         "reply": reply_text[:240] if reply_text else None,
         "text": text,
@@ -203,11 +227,12 @@ def upload_name(attachment, first_chunk):
 
 
 class DialogSpy:
-    def __init__(self, api, archive, vault=None, *, bot_id=None):
+    def __init__(self, api, archive, vault=None, *, bot_id=None, bot_username=None):
         self.api = api
         self.archive = archive
         self.vault = vault
         self.bot_id = bot_id
+        self.bot_username = bot_username
         self.pair_code = secrets.token_urlsafe(24)
 
     def queue_text(self, owner_id, text):
@@ -226,6 +251,10 @@ class DialogSpy:
             parameters["photo"] = attachment["photo_id"]
         if label and field not in ("sticker", "video_note"):
             parameters["caption"] = label
+            if field in ("photo", "live_photo", "video", "animation"):
+                parameters["show_caption_above_media"] = True
+        elif label:
+            self.queue_text(owner_id, label)
         if attachment["spoiler"] and field in ("animation", "live_photo", "photo", "video"):
             parameters["has_spoiler"] = True
         if self.vault:
@@ -271,10 +300,8 @@ class DialogSpy:
                  "before": None, "after": snapshot, "time": reply.get("date")}
         reference = self.archive.save_event(chat["id"], event)
         self.queue_download(attachment, priority=True)
-        label = f"Медиа из ответа · {event['chat']}\nАрхив: /media {reference}"
+        label = media_author(snapshot, event["chat"])
         self.queue_attachment(owner_id, attachment, label, reply_ref=reference)
-        if attachment["type"] == "video_note":
-            self.queue_text(owner_id, label)
 
     def queue_diff(self, owner_id, before, after):
         if before and after and before["text"] != after["text"]:
@@ -290,46 +317,29 @@ class DialogSpy:
     def queue_notice(self, owner_id, event):
         before, after = event["before"], event["after"]
         deleted = event["kind"] == "delete"
-        title = "🗑 Сообщение удалено" if deleted else "✏️ Сообщение изменено"
-        details = [f"Чат · {event['chat']}"]
         known = after or before
-        if known:
-            details.append(f"Автор · {known['author']}")
-            if known.get("sent_at"):
-                details.append(f"Отправлено · {format_time(known['sent_at'])}")
-        elif deleted:
-            details.append(f"ID сообщения · {event['message_id']}")
-        if event.get("time"):
-            label = "Удаление замечено" if deleted else "Изменено"
-            details.append(f"{label} · {format_time(event['time'])}")
-
-        old_text, new_text = describe(before), describe(after)
+        author = author_link(known, event["chat"])
         if deleted:
-            sections = [("Сообщение", [(None, old_text)])]
-            if before and before.get("reply"):
-                sections.append(("Ответ на сообщение", [(None, before["reply"])]))
-            if event.get("context"):
-                snippets = [f"{item['author']}: {describe(item)[:240]}" for item in event["context"]]
-                sections.append(("Соседние сообщения", [(None, "\n".join(snippets))]))
+            header = f"{author} — сообщение удалено:"
+            sections = [("", describe(before))]
         else:
-            old_runs, new_runs = ([(None, old_text)], [(None, new_text)])
-            if before and old_text != new_text:
-                old_runs, new_runs = version_runs(old_text, new_text)
-            elif before:
-                details.append("Изменилось оформление или вложение.")
-            sections = [("Было", old_runs), ("Стало", new_runs)]
+            header = f"{author} изменил(а) сообщение:"
+            sections = [("Old", describe(before)), ("New", describe(after))]
+        photo_only = known and known["attachment"] and known["attachment"]["type"] in ("photo", "live_photo") and not (
+            (before and before["text"]) or (after and after["text"])
+        )
+        if not photo_only:
+            self.queue_html(owner_id, notice_parts(header, sections, self.bot_username))
         reference = event.get("ref")
-        footer = f"История · /history {reference}" if reference else ""
-        self.queue_html(owner_id, notice_parts(title, details, sections, footer))
 
         old_media = before and before["attachment"]
         new_media = after and after["attachment"]
         if deleted or attachment_identity(old_media) != attachment_identity(new_media):
             if old_media:
-                self.queue_attachment(owner_id, old_media, "Удалённое вложение" if deleted else "Было",
+                self.queue_attachment(owner_id, old_media, media_author(before, event["chat"]),
                                       archive_ref=reference)
             if new_media:
-                self.queue_attachment(owner_id, new_media, "Стало", archive_ref=reference)
+                self.queue_attachment(owner_id, new_media, media_author(after, event["chat"]), archive_ref=reference)
 
     def show_history(self, owner_id, history):
         first = history[0]
@@ -369,10 +379,11 @@ class DialogSpy:
             versions = [event["after"] for event in history if event["after"]]
             version = int(args[1]) if len(args) == 2 else len(versions)
             if 1 <= version <= len(versions) and versions[version - 1]["attachment"]:
-                attachment = versions[version - 1]["attachment"]
+                snapshot = versions[version - 1]
+                attachment = snapshot["attachment"]
                 key = self.archive.media_key(attachment)
                 if self.vault and self.vault.exists(key):
-                    self.queue_attachment(owner_id, attachment, None, local=True)
+                    self.queue_attachment(owner_id, attachment, media_author(snapshot, history[0]["chat"]), local=True)
                 else:
                     self.queue_text(owner_id, "Локальной копии пока нет. Для облачного Bot API доступны файлы до 20 МБ.")
             else:
@@ -440,6 +451,8 @@ class DialogSpy:
             return
         if kind == "new":
             self.capture_reply(message, owner_id)
+            if self.love_command(message, owner_id):
+                return
         after = message_snapshot(message, owner_id)
         if after is None:
             return
@@ -463,7 +476,7 @@ class DialogSpy:
             return
         for message_id in update["message_ids"]:
             previous = self.archive.last_message_event(chat["id"], message_id)
-            if previous and previous["kind"] == "delete":
+            if previous and previous["kind"] in ("delete", "command"):
                 continue
             event = {"kind": "delete", "chat": display_name(chat), "message_id": message_id,
                      "before": previous["after"] if previous else None, "after": None,
@@ -505,6 +518,9 @@ class DialogSpy:
             item_id, payload = item
             method, parameters = payload["method"], payload["parameters"]
             owner_id = self.archive.setting("owner")
+            if method == "loveAnimation":
+                self.deliver_love(item_id, parameters, owner_id)
+                continue
             if owner_id is None or parameters.get("chat_id") != owner_id or "business_connection_id" in parameters:
                 logging.error("Очередь содержит отправку за пределы личного чата владельца")
                 with self.archive.db:
@@ -536,6 +552,95 @@ class DialogSpy:
                     continue
             with self.archive.db:
                 self.archive.delivered(item_id)
+
+    def love_command(self, message, owner_id):
+        if message.get("from", {}).get("id") != owner_id or message.get("sender_business_bot"):
+            return False
+        if message.get("text", "").strip() != ".luv":
+            return False
+        chat = message["chat"]
+        if self.archive.last_message_event(chat["id"], message["message_id"]):
+            return True
+        self.archive.save_event(chat["id"], {
+            "kind": "command", "chat": display_name(chat), "message_id": message["message_id"],
+            "before": None, "after": None, "time": message.get("date"),
+        })
+        self.archive.queue("loveAnimation", {
+            "chat_id": chat["id"], "business_connection_id": message["business_connection_id"],
+            "command_id": message["message_id"], "owner_id": owner_id, "chat": display_name(chat),
+        })
+        return True
+
+    def love_failed(self, item_id, owner_id, text):
+        with self.archive.db:
+            self.archive.delivered(item_id)
+            if owner_id is not None:
+                self.queue_text(owner_id, text)
+
+    def deliver_love(self, item_id, parameters, owner_id):
+        connection_id = parameters["business_connection_id"]
+        if owner_id is None or parameters.get("owner_id") != owner_id or self.archive.setting("connection") != connection_id:
+            self.love_failed(item_id, owner_id, "Для .luv нужно действующее подключение бота к вашему аккаунту.")
+            return
+        try:
+            self.advance_love(item_id, parameters, owner_id)
+        except TelegramError as error:
+            if error.temporary or error.code == 401:
+                raise
+            logging.warning("Telegram отклонил команду .luv (%s)", error)
+            text = "Telegram прервал анимацию .luv. Проверьте права бота в настройках подключения." if parameters.get("message_id") else (
+                "Telegram не разрешил отправить .luv. Проверьте права бота и что собеседник писал в этом чате за последние 24 часа."
+            )
+            self.love_failed(item_id, owner_id, text)
+            return
+
+    def advance_love(self, item_id, parameters, owner_id):
+        connection_id = parameters["business_connection_id"]
+        target = {"business_connection_id": connection_id, "chat_id": parameters["chat_id"]}
+        if not parameters.get("message_id"):
+            connection = self.api.call("getBusinessConnection", business_connection_id=connection_id)
+            rights = connection.get("rights") or {}
+            if connection["user"]["id"] != owner_id or not connection["is_enabled"]:
+                self.love_failed(item_id, owner_id, "Telegram отключил бота. Подключите его заново для команды .luv.")
+                return
+            if not rights.get("can_delete_all_messages") or (not parameters.get("sent") and not rights.get("can_reply")):
+                self.love_failed(item_id, owner_id, "Для .luv включите права «Отвечать» и «Удалять все сообщения» "
+                                 "в настройках подключения бота. Затем отправьте .luv заново.")
+                return
+            if parameters.get("sent"):
+                # Finish deletion for a previously sent animation from an older version.
+                self.api.call("deleteBusinessMessages", business_connection_id=connection_id,
+                              message_ids=[parameters["command_id"]])
+                with self.archive.db:
+                    self.archive.delivered(item_id)
+                return
+            sent = self.api.call("sendMessage", **target, text=LOVE_FRAMES[0])
+            parameters.update(message_id=sent["message_id"], frame=0)
+            with self.archive.db:
+                self.archive.save_event(parameters["chat_id"], {
+                    "kind": "command", "chat": parameters.get("chat", str(parameters["chat_id"])),
+                    "message_id": sent["message_id"], "before": None, "after": None, "time": int(time.time()),
+                })
+                self.archive.update_pending(item_id, "loveAnimation", parameters)
+        if not parameters.get("deleted"):
+            self.api.call("deleteBusinessMessages", business_connection_id=connection_id,
+                          message_ids=[parameters["command_id"]])
+            parameters["deleted"] = True
+            with self.archive.db:
+                self.archive.update_pending(item_id, "loveAnimation", parameters, LOVE_FRAME_DELAY)
+            return
+        frame = parameters["frame"] + 1
+        try:
+            self.api.call("editMessageText", **target, message_id=parameters["message_id"], text=LOVE_FRAMES[frame])
+        except TelegramError as error:
+            if not error.message_not_modified:
+                raise
+        parameters["frame"] = frame
+        with self.archive.db:
+            if frame == len(LOVE_FRAMES) - 1:
+                self.archive.delivered(item_id)
+            else:
+                self.archive.update_pending(item_id, "loveAnimation", parameters, LOVE_FRAME_DELAY)
 
     def deliver(self, method, parameters):
         backup = parameters.pop("_backup", None)
@@ -603,7 +708,7 @@ class DialogSpy:
 
                 if time.monotonic() - last_poll >= 86400:
                     offset = None
-                timeout = 2 if self.archive.pending() else 25
+                timeout = 1 if self.archive.has_pending() else 25
                 parameters = {"timeout": timeout, "allowed_updates": UPDATES}
                 if offset is not None:
                     parameters["offset"] = offset
@@ -638,7 +743,7 @@ def main():
         archive = Archive(database, key)
         with closing(archive.db):
             vault = MediaVault(database.with_suffix(".media"), archive.cipher)
-            bot = DialogSpy(api, archive, vault, bot_id=me["id"])
+            bot = DialogSpy(api, archive, vault, bot_id=me["id"], bot_username=me["username"])
             if archive.setting("owner") is None:
                 print(f"Откройте ссылку в своём Telegram и нажмите «Запустить»:\n"
                       f"https://t.me/{me['username']}?start={bot.pair_code}", flush=True)

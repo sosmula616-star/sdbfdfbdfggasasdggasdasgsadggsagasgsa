@@ -2,6 +2,7 @@ import hmac
 import json
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -49,7 +50,11 @@ class Archive:
                     received INTEGER NOT NULL DEFAULT (unixepoch())
                 );
                 CREATE INDEX IF NOT EXISTS processed_received ON processed(received);
-                CREATE TABLE IF NOT EXISTS outbox (id INTEGER PRIMARY KEY, data BLOB NOT NULL);
+                CREATE TABLE IF NOT EXISTS outbox (
+                    id INTEGER PRIMARY KEY,
+                    data BLOB NOT NULL,
+                    ready_at REAL NOT NULL DEFAULT 0
+                );
                 CREATE TABLE IF NOT EXISTS downloads (
                     id TEXT PRIMARY KEY,
                     data BLOB NOT NULL,
@@ -60,6 +65,9 @@ class Archive:
             if "chat_key" not in columns:
                 self.db.execute("ALTER TABLE events ADD COLUMN chat_key BLOB")
             self.db.execute("CREATE INDEX IF NOT EXISTS events_chat ON events(chat_key, id)")
+            outbox_columns = {row[1] for row in self.db.execute("PRAGMA table_info(outbox)")}
+            if "ready_at" not in outbox_columns:
+                self.db.execute("ALTER TABLE outbox ADD COLUMN ready_at REAL NOT NULL DEFAULT 0")
             if self.setting("archive") is None:
                 with self.db:
                     self.set_setting("archive", True)
@@ -179,8 +187,18 @@ class Archive:
         self.db.execute("INSERT INTO outbox(data) VALUES (?)", (payload,))
 
     def pending(self):
-        row = self.db.execute("SELECT id, data FROM outbox ORDER BY id LIMIT 1").fetchone()
+        row = self.db.execute(
+            "SELECT id, data FROM outbox WHERE ready_at <= ? ORDER BY id LIMIT 1", (time.time(),)
+        ).fetchone()
         return (row[0], self.decrypt(row[1])) if row else None
+
+    def has_pending(self):
+        return self.db.execute("SELECT 1 FROM outbox LIMIT 1").fetchone() is not None
+
+    def update_pending(self, item_id, method, parameters, delay=0):
+        payload = self.encrypt({"method": method, "parameters": parameters})
+        self.db.execute("UPDATE outbox SET data = ?, ready_at = ? WHERE id = ?",
+                        (payload, time.time() + delay, item_id))
 
     def delivered(self, item_id):
         self.db.execute("DELETE FROM outbox WHERE id = ?", (item_id,))

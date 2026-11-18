@@ -8,33 +8,45 @@ def format_time(timestamp):
     return datetime.fromtimestamp(timestamp).astimezone().strftime("%d.%m.%Y %H:%M:%S %z")
 
 
-def version_runs(before, after):
-    tokens = re.compile(r"\w+|\s+|[^\w\s]")
-    old, new = tokens.findall(before), tokens.findall(after)
-    old_runs, new_runs = [], []
-    for operation, start_old, end_old, start_new, end_new in SequenceMatcher(None, old, new, autojunk=False).get_opcodes():
-        if end_old > start_old:
-            old_runs.append((None if operation == "equal" else "s", "".join(old[start_old:end_old])))
-        if end_new > start_new:
-            new_runs.append((None if operation == "equal" else "u", "".join(new[start_new:end_new])))
-    return old_runs, new_runs
+def author_username(snapshot):
+    username = snapshot.get("author_username")
+    if not username:
+        match = re.search(r"(?:^@|\(@)([A-Za-z0-9_]+)\)?$", snapshot.get("author", ""))
+        username = match[1] if match else None
+    return username if username and re.fullmatch(r"[A-Za-z0-9_]+", username) else None
 
 
-def notice_parts(title, details, sections, footer):
-    lines = [title, *details]
-    page = [f"<b>{escape(title, quote=False)}</b>", *(escape(line, quote=False) for line in details)]
-    used = sum(len(line) + 1 for line in lines)
-    for label, runs in sections:
-        for html, size in rendered_runs(runs, 1600):
-            if page and used + len(label) + size + 3 > 1900:
-                yield "\n".join(page)
-                page, used = [], 0
-            page.append(f"\n<b>{escape(label, quote=False)}</b>\n<blockquote>{html}</blockquote>")
-            used += len(label) + size + 3
-    if footer:
-        page.append(f"\n{escape(footer, quote=False)}")
+def author_link(snapshot, fallback):
+    snapshot = snapshot or {}
+    label = escape(snapshot.get("author") or fallback, quote=False)
+    username = author_username(snapshot)
+    if username:
+        return f'<a href="https://t.me/{username}">{label}</a>'
+    user_id = snapshot.get("author_id")
+    if isinstance(user_id, int) and user_id > 0:
+        return f'<a href="tg://user?id={user_id}">{label}</a>'
+    return label
+
+
+def media_author(snapshot, fallback):
+    username = author_username(snapshot)
+    return f"@{username}" if username else snapshot.get("author") or fallback
+
+
+def notice_parts(header, sections, bot_username):
+    footer = escape(f"@{bot_username}", quote=False) if bot_username else ""
+    overhead = len(header) + len(footer) + 8
+    page, used = [], overhead
+    for label, text in sections:
+        for html, size in rendered_runs([(None, text)], 1500):
+            if page and used + len(label) + size + 4 > 1900:
+                yield "\n\n".join([header, *page, footer]).rstrip()
+                page, used = [], overhead
+            heading = f"{escape(label)}:\n" if label else ""
+            page.append(f"{heading}<blockquote>{html}</blockquote>")
+            used += len(label) + size + 4
     if page:
-        yield "\n".join(page)
+        yield "\n\n".join([header, *page, footer]).rstrip()
 
 
 def diff_parts(before, after, limit=2000):

@@ -11,10 +11,11 @@ from urllib.request import Request, urlopen
 
 
 class TelegramError(Exception):
-    def __init__(self, method, code=None, retry_after=None):
+    def __init__(self, method, code=None, retry_after=None, *, message_not_modified=False):
         self.method = method
         self.code = code
         self.retry_after = retry_after
+        self.message_not_modified = message_not_modified
         # Telegram responses and request URLs can contain private data.
         super().__init__(f"{method}: {code or 'ошибка связи с Telegram'}")
 
@@ -62,6 +63,7 @@ class Telegram:
         raise TelegramError(
             method, result.get("error_code", http_status),
             result.get("parameters", {}).get("retry_after"),
+            message_not_modified="message is not modified" in result.get("description", "").lower(),
         )
 
     @contextmanager
