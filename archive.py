@@ -9,6 +9,9 @@ from cryptography.fernet import Fernet
 
 
 def load_key(bot_id, database_path):
+    project_key = Path(__file__).resolve().parent / f"{bot_id}.key"
+    if project_key.is_file():
+        return project_key.read_bytes()
     if os.name == "nt":
         key_dir = Path(os.environ["LOCALAPPDATA"]) / "Dialogspy"
     else:
@@ -17,7 +20,8 @@ def load_key(bot_id, database_path):
     key_path = key_dir / f"{bot_id}.key"
     if not key_path.exists():
         if database_path.exists():
-            raise RuntimeError(f"Для существующего архива нужен ключ {key_path}")
+            raise RuntimeError(f"Для существующего архива положите исходный ключ {bot_id}.key "
+                               f"рядом с bot.py: {project_key}")
         key_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
         try:
             descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
