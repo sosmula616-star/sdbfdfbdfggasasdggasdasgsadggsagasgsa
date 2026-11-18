@@ -36,6 +36,8 @@ def load_key(bot_id, database_path):
     sample = archive_sample(database_path)
     available = []
     for candidate in (project_key, key_path):
+        if candidate == key_path and not database_path.exists():
+            continue
         if not candidate.is_file():
             continue
         available.append(str(candidate))
@@ -50,19 +52,17 @@ def load_key(bot_id, database_path):
     if available:
         raise RuntimeError(f"Найденные ключи не открывают архив {database_path}. "
                            f"Проверены: {', '.join(available)}. Нужен исходный ключ этого архива.")
-    if not key_path.exists():
-        if database_path.exists():
-            raise RuntimeError(f"Для существующего архива положите исходный ключ {bot_id}.key "
-                               f"рядом с bot.py: {project_key}")
-        key_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
-        try:
-            descriptor = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-        except FileExistsError:
-            pass
-        else:
-            with os.fdopen(descriptor, "wb") as key_file:
-                key_file.write(Fernet.generate_key())
-    return key_path.read_bytes()
+    if database_path.exists():
+        raise RuntimeError(f"Для существующего архива положите исходный ключ {bot_id}.key "
+                           f"рядом с bot.py: {project_key}")
+    try:
+        descriptor = os.open(project_key, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        pass
+    else:
+        with os.fdopen(descriptor, "wb") as key_file:
+            key_file.write(Fernet.generate_key())
+    return project_key.read_bytes()
 
 
 def start_new_archive(bot_id, database_path):

@@ -740,11 +740,14 @@ def main(*, new_archive=False):
     directory.mkdir(exist_ok=True)
     database = directory / f"{me['id']}.sqlite3"
     with single_instance(database.with_suffix(".lock")):
-        if new_archive:
+        reset_request = ROOT / "new-archive.once"
+        if new_archive or reset_request.is_file():
             backup = start_new_archive(me["id"], database)
-            print(f"Резервная копия архива и медиа сохранена в {backup}\n"
-                  "Новый архив создан. Теперь запустите python bot.py и откройте ссылку привязки.", flush=True)
-            return
+            reset_request.unlink(missing_ok=True)
+            print(f"Резервная копия архива и медиа сохранена в {backup}\nНовый архив создан.", flush=True)
+            if new_archive:
+                print("Теперь запустите python bot.py и откройте ссылку привязки.", flush=True)
+                return
         key = load_key(me["id"], database)
         archive = Archive(database, key)
         with closing(archive.db):
