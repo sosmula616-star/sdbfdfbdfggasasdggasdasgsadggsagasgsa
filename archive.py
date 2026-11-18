@@ -1,23 +1,55 @@
 import hmac
 import json
 import os
+import secrets
 import sqlite3
 import time
+from contextlib import closing
+from datetime import datetime, timezone
 from pathlib import Path
 
-from cryptography.fernet import Fernet
+from cryptography.fernet import Fernet, InvalidToken
+
+
+def archive_sample(database_path):
+    if not database_path.exists():
+        return None
+    uri = database_path.resolve().as_uri() + "?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as database:
+        tables = {row[0] for row in database.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
+        for table in ("settings", "events", "outbox", "downloads"):
+            if table in tables:
+                row = database.execute(f'SELECT data FROM "{table}" LIMIT 1').fetchone()
+                if row:
+                    return row[0]
+    return None
 
 
 def load_key(bot_id, database_path):
     project_key = Path(__file__).resolve().parent / f"{bot_id}.key"
-    if project_key.is_file():
-        return project_key.read_bytes()
     if os.name == "nt":
         key_dir = Path(os.environ["LOCALAPPDATA"]) / "Dialogspy"
     else:
         config_dir = os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config"
         key_dir = Path(config_dir) / "dialogspy"
     key_path = key_dir / f"{bot_id}.key"
+    sample = archive_sample(database_path)
+    available = []
+    for candidate in (project_key, key_path):
+        if not candidate.is_file():
+            continue
+        available.append(str(candidate))
+        key = candidate.read_bytes().strip()
+        try:
+            cipher = Fernet(key)
+            if sample is not None:
+                cipher.decrypt(sample)
+        except (InvalidToken, ValueError):
+            continue
+        return key
+    if available:
+        raise RuntimeError(f"Найденные ключи не открывают архив {database_path}. "
+                           f"Проверены: {', '.join(available)}. Нужен исходный ключ этого архива.")
     if not key_path.exists():
         if database_path.exists():
             raise RuntimeError(f"Для существующего архива положите исходный ключ {bot_id}.key "
@@ -31,6 +63,47 @@ def load_key(bot_id, database_path):
             with os.fdopen(descriptor, "wb") as key_file:
                 key_file.write(Fernet.generate_key())
     return key_path.read_bytes()
+
+
+def start_new_archive(bot_id, database_path):
+    database_path = database_path.resolve()
+    directory = database_path.parent
+    if database_path.name != f"{bot_id}.sqlite3":
+        raise ValueError("Имя архива не совпадает с ID бота.")
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    backup = directory / "backups" / f"{bot_id}-{stamp}-{secrets.token_hex(3)}"
+    sources = [database_path, *(Path(str(database_path) + suffix) for suffix in ("-wal", "-shm", "-journal")),
+               database_path.with_suffix(".media")]
+    if not backup.resolve().is_relative_to(directory) or any(
+        not source.resolve().is_relative_to(directory) for source in sources
+    ):
+        raise RuntimeError("Архив и резервная копия должны находиться в папке данных бота.")
+
+    key = load_key(bot_id, backup / "new.sqlite3")
+    backup.mkdir(mode=0o700, parents=True, exist_ok=False)
+    moved = []
+    try:
+        for source in sources:
+            if source.exists():
+                destination = backup / source.name
+                source.rename(destination)
+                moved.append((source, destination))
+    except BaseException:
+        for source, destination in reversed(moved):
+            destination.rename(source)
+        backup.rmdir()
+        raise
+    try:
+        with closing(Archive(database_path, key).db):
+            pass
+    except BaseException:
+        for source in sources[:-1]:
+            source.unlink(missing_ok=True)
+        for source, destination in reversed(moved):
+            destination.rename(source)
+        backup.rmdir()
+        raise
+    return backup
 
 
 class Archive:

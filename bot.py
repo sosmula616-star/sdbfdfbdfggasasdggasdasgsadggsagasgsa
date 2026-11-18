@@ -1,3 +1,4 @@
+import argparse
 import logging
 import os
 import re
@@ -11,7 +12,7 @@ from threading import Event
 
 from cryptography.fernet import InvalidToken
 
-from archive import Archive, load_key
+from archive import Archive, load_key, start_new_archive
 from formatting import author_link, diff_parts, format_time, media_author, notice_parts
 from media_vault import MediaVault, download_worker
 from telegram_api import Telegram, TelegramError
@@ -726,7 +727,7 @@ class DialogSpy:
                 time.sleep(error.retry_after or 5)
 
 
-def main():
+def main(*, new_archive=False):
     api = Telegram(*read_config())
     me = api.call("getMe")
     if not me.get("can_connect_to_business"):
@@ -739,6 +740,11 @@ def main():
     directory.mkdir(exist_ok=True)
     database = directory / f"{me['id']}.sqlite3"
     with single_instance(database.with_suffix(".lock")):
+        if new_archive:
+            backup = start_new_archive(me["id"], database)
+            print(f"Резервная копия архива и медиа сохранена в {backup}\n"
+                  "Новый архив создан. Теперь запустите python bot.py и откройте ссылку привязки.", flush=True)
+            return
         key = load_key(me["id"], database)
         archive = Archive(database, key)
         with closing(archive.db):
@@ -755,8 +761,12 @@ def main():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+    parser = argparse.ArgumentParser(description="Личный архив Telegram")
+    parser.add_argument("--new-archive", action="store_true",
+                        help="сохранить резервную копию архива и медиа, создать новый архив и выйти")
+    arguments = parser.parse_args()
     try:
-        main()
+        main(new_archive=arguments.new_archive)
     except KeyboardInterrupt:
         print("Бот остановлен.")
     except TelegramError as error:
